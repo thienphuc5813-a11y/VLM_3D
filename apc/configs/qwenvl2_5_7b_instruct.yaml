@@ -1,0 +1,34 @@
+# VLM
+vlm:
+  type: qwenvl2_5
+  pretrained_model: Qwen/Qwen2.5-VL-7B-Instruct
+  model_name: llava_llama3
+  conv_template: llava_llama_3
+  # MLLM sampling parameters
+  do_sample: false
+  temperature: 0.0
+  max_new_tokens: 512
+  response_role: system  # role given to the VLM's own answers in multi-turn prompts (original: system; alternative: assistant)
+
+# Detection - Grounding DINO
+detection:
+  ckpt_path: apc/vision_modules/src/checkpoints/groundingdino_swint_ogc.pth
+  box_threshold: 0.05 # 45
+  text_threshold: 0.05
+  num_candidates: 5
+  use_vlm_refinement: true
+  refinement_parse: substring  # how to read the VLM's chosen index: substring (original, first i with str(i) in answer) | first_integer
+
+# Segmentation - SAM
+segmentation:
+  ckpt_path: apc/vision_modules/src/checkpoints/sam_vit_h_4b8939.pth
+
+# Depth - DepthPro
+depth:
+  ckpt_path: apc/vision_modules/src/checkpoints/depth_pro.pt
+  use_estimated_focal: false  # false (original): fixed f = 4 * image width; true: Depth Pro's estimated focal length
+  mode_filter_ratio: 0.1      # keep mask points within ±ratio of the depth mode (original: 0.1); 0 disables the filter
+
+# Orientation - OrientAnything
+orientation:
+  ckpt_path: apc/vision_modules/src/checkpoints

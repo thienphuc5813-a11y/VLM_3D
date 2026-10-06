@@ -1,0 +1,16 @@
+b47d123 test: bo duong ne B2/B5 (da sua trong apc/), them so sanh truoc/sau cho muc 4.4
+78c96b6 feat(R4): option detection.refinement_parse (mac dinh substring nhu goc)
+24c3804 feat(R3): option vlm.response_role (mac dinh system nhu goc)
+60517f7 feat(R2): option depth.mode_filter_ratio (mac dinh 0.1 nhu goc, 0 = tat loc)
+31baffe feat(R1): option depth.use_estimated_focal (mac dinh false = f=4W nhu goc)
+afb6e91 fix(B9): max_new_tokens mac dinh doc tu config VLM thay vi 1024
+e42b33a fix(B8): chay DepthPro mot lan cho moi anh thay vi moi vat
+25a339b fix(B7): bao loi ro rang khi so vat vuot qua so mau cua visual prompt
+b8903f4 fix(B6): khoi tao z_trans khi render_whole_scene va moi vat da o phia truoc
+ff21b3e fix(B5): truyen device cua module vao GroundingDINO predict()
+35fd336 fix(B4): khong sua tai cho position/orientation cua scene dict dau vao
+570ef14 fix(B3): get_objects_of_interest tra ve (None, conv_history), run_apc dung som
+6a9c9aa fix(B2): doi box cxcywh chuan hoa sang xyxy pixel khi tat VLM refinement
+9f9ed94 fix(B1): loc orientations/colors cung chi so voi positions trong renderer
+381f0f3 test: harness theo LOCAL_RUN_PLAN muc 4 + tai lieu phan tich (chua sua apc/)
+dcd4e7e baseline: upstream APC-VLM (chua sua gi)

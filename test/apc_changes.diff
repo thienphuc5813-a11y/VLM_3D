@@ -1,0 +1,313 @@
+diff --git a/apc/apc_pipeline.py b/apc/apc_pipeline.py
+index 9faae53..5d7b6ea 100644
+--- a/apc/apc_pipeline.py
++++ b/apc/apc_pipeline.py
+@@ -146,7 +146,7 @@ class APC:
+         # If no match found, return error
+         if not match_found:
+             self.logger.error(f"[Scene Abstraction] No match found for objects of interest")
+-            return None
++            return None, conv_history
+         
+         # Parse the response
+         match_objs = match_objs[-1]
+@@ -272,6 +272,7 @@ class APC:
+         }
+         box3D_meshes = []
+         box3D_obj_names = []
++        depth_npy = None    # same for every object: estimated once, on first detection
+         _, image_processed = self.detection_module.detection_process_image(image)
+         image_h, image_w = image_processed.shape[1], image_processed.shape[2]
+ 
+@@ -297,12 +298,16 @@ class APC:
+                     **apc_args,
+                 )
+             else:
+-                box2D = boxes[selected_idx]
++                # run_detection returns normalized cxcywh; SAM and cropping need xyxy pixels
++                image_W, image_H = image.size
++                x0, y0, x1, y1 = cxcywh_to_xyxy(boxes[selected_idx])
++                box2D = [int(x0 * image_W), int(y0 * image_H), int(x1 * image_W), int(y1 * image_H)]
+ 
+             # ------------------------------------------------------------ #
+             # Run depth estimation
+             # ------------------------------------------------------------ #
+-            depth_npy = self.depth_module.run_depth_estimation(image)
++            if depth_npy is None:
++                depth_npy = self.depth_module.run_depth_estimation(image)
+ 
+             # ------------------------------------------------------------ #
+             # Run segmentation
+@@ -415,12 +420,22 @@ class APC:
+         '''
+         self.logger.info("[Perspective Prompting] Generate visual perspective prompts...")
+ 
++        if len(abstract_scene_dict_ref) > len(self.color_dict):
++            raise ValueError(
++                f"Visual prompt supports at most {len(self.color_dict)} entities "
++                f"(including the reference viewer and the camera), got {len(abstract_scene_dict_ref)}"
++            )
++
++        # Role of the VLM's own answers in the conversation (original APC: 'system')
++        response_role = self.config.vlm.get("response_role", "system")
++
+         # Convert convention (PyTorch3D -> TriMesh)
+         abstract_scene_dict_ref_ = {}
+ 
+         for obj_idx, (obj_name, obj_dict) in enumerate(abstract_scene_dict_ref.items()):
+-            position = obj_dict['position']
+-            orientation = obj_dict['orientation']
++            # copy: flipping in place would corrupt the caller's scene dict
++            position = np.array(obj_dict['position'], dtype=float)
++            orientation = np.array(obj_dict['orientation'], dtype=float)
+             position[1:] = -position[1:]
+             orientation[1:] = -orientation[1:]
+ 
+@@ -481,7 +496,7 @@ class APC:
+ 
+         messages = add_message(
+             messages,
+-            role='system',
++            role=response_role,
+             text=response_perspective_visual_abstract,
+         )
+         self.logger.info(f"[Perspective Prompting] Obtained abstract response: {response_perspective_visual_abstract}")
+@@ -501,7 +516,7 @@ class APC:
+         )
+         response_perspective_visual = self.vlm_model.process_messages(messages)
+ 
+-        messages = add_message(messages, role='system', text=response_perspective_visual,)
++        messages = add_message(messages, role=response_role, text=response_perspective_visual,)
+         self.logger.info(f"[Perspective Prompting] Translate abstract -> real: {response_perspective_visual}")
+ 
+         # Update conv_history if needed
+@@ -574,6 +589,9 @@ class APC:
+         # ------------------------------------------------------------ #
+         # Extract objects of interest
+         objs_of_interest, conv_history = self.get_objects_of_interest(image, prompt, conv_history=conv_history)
++        if objs_of_interest is None:
++            self.logger.error("[APC] Could not extract objects of interest, stopping")
++            return None, conv_history
+         self.logger.info(f"[Scene Abstraction] Objects of interest: {objs_of_interest}")
+ 
+         # Run 3D scene abstraction (from camera's perspective)
+diff --git a/apc/configs/qwenvl2_5_7b_instruct.yaml b/apc/configs/qwenvl2_5_7b_instruct.yaml
+index b2e5440..cc42680 100644
+--- a/apc/configs/qwenvl2_5_7b_instruct.yaml
++++ b/apc/configs/qwenvl2_5_7b_instruct.yaml
+@@ -8,6 +8,7 @@ vlm:
+   do_sample: false
+   temperature: 0.0
+   max_new_tokens: 512
++  response_role: system  # role given to the VLM's own answers in multi-turn prompts (original: system; alternative: assistant)
+ 
+ # Detection - Grounding DINO
+ detection:
+@@ -16,6 +17,7 @@ detection:
+   text_threshold: 0.05
+   num_candidates: 5
+   use_vlm_refinement: true
++  refinement_parse: substring  # how to read the VLM's chosen index: substring (original, first i with str(i) in answer) | first_integer
+ 
+ # Segmentation - SAM
+ segmentation:
+@@ -24,6 +26,8 @@ segmentation:
+ # Depth - DepthPro
+ depth:
+   ckpt_path: apc/vision_modules/src/checkpoints/depth_pro.pt
++  use_estimated_focal: false  # false (original): fixed f = 4 * image width; true: Depth Pro's estimated focal length
++  mode_filter_ratio: 0.1      # keep mask points within ±ratio of the depth mode (original: 0.1); 0 disables the filter
+ 
+ # Orientation - OrientAnything
+ orientation:
+diff --git a/apc/renderer.py b/apc/renderer.py
+index 8f32d91..7e3e5a9 100644
+--- a/apc/renderer.py
++++ b/apc/renderer.py
+@@ -194,7 +194,8 @@ class RenderModule:
+         orientations = []
+         colors = []
+         for obj in objects_to_render:
+-            positions.append(scene_abs_dict[obj]["position"])
++            # copy: positions are rescaled in place below
++            positions.append(np.array(scene_abs_dict[obj]["position"], dtype=float))
+             orientations.append(scene_abs_dict[obj]["orientation"])
+             colors.append(scene_abs_dict[obj]["color"])
+         
+@@ -214,6 +215,7 @@ class RenderModule:
+             max_z_obj_pos = positions[max_z_obj_idx]
+             max_z = max_z_obj_pos[2]
+ 
++            z_trans = 0.0   # all objects already in front of the viewer: no need to move back
+             if max_z >= 0:
+                 dist_xy = np.linalg.norm(max_z_obj_pos[:2])
+                 z_trans = max_z + dist_xy * math.atan(math.radians(cam_fov_deg / 2.0))
+@@ -230,6 +232,10 @@ class RenderModule:
+             positions_ori_idx = [i for i, pos in enumerate(positions) if pos[2] < 0]    # Keep original indices
+             positions = [pos for pos in positions if pos[2] < 0]
+ 
++        # Keep orientations/colors aligned with the (possibly filtered) positions
++        orientations = [orientations[i] for i in positions_ori_idx]
++        colors = [colors[i] for i in positions_ori_idx]
++
+         # Normalize positions
+         if len(positions) > 0:
+             # Get max x, y
+diff --git a/apc/vision_modules/depth.py b/apc/vision_modules/depth.py
+index 64f7e9d..f7e7b5f 100644
+--- a/apc/vision_modules/depth.py
++++ b/apc/vision_modules/depth.py
+@@ -163,9 +163,19 @@ class DepthModule:
+         depth_pred = self.depth_model.infer(image, f_px=f_px)
+         depth = depth_pred["depth"]
+         depth_npy = depth.cpu().numpy().astype(np.float32)
++        self.last_focal_px = float(depth_pred["focallength_px"])
+ 
+         return depth_npy
+-    
++
++    def get_focal_length(self, image_w: int):
++        '''
++        Focal length (px) used for unprojection.
++        Default (original APC): fixed 4 * image width. With depth.use_estimated_focal: Depth Pro's estimate.
++        '''
++        if self.config.depth.get("use_estimated_focal", False):
++            return self.last_focal_px
++        return 4.0 * image_w
++
+     def unproject_to_3D(
+         self,
+         image: Image.Image,
+@@ -182,10 +192,9 @@ class DepthModule:
+ 
+         # Set camera intrinsic matrix (K)
+         image_w, image_h = image.size
+-        focal_len_ndc = 4.0
+-        focal_len = focal_len_ndc * image_w
++        focal_len = self.get_focal_length(image_w)
+         px, py = image_w / 2, image_h / 2
+-        
++
+         K = np.array([
+             [focal_len, 0.0, px],
+             [0.0, focal_len, py],
+@@ -217,13 +226,17 @@ class DepthModule:
+         depth_values = np.array(depth_values)
+         mode_depth, _ = mode(depth_values, keepdims=True)   # scipy mode function
+ 
+-        # Set a depth threshold (e.g., keep points within ±10% of the mode)
+-        threshold = 0.1 * mode_depth[0]
+-        depth_values_filtered = (
+-            depth_values >= mode_depth[0] - threshold
+-        ) & (
+-            depth_values <= mode_depth[0] + threshold
+-        )
++        # Keep points within ±ratio of the mode (original APC: ratio = 0.1); ratio <= 0 disables the filter
++        ratio = self.config.depth.get("mode_filter_ratio", 0.1)
++        if ratio is not None and ratio > 0:
++            threshold = ratio * mode_depth[0]
++            depth_values_filtered = (
++                depth_values >= mode_depth[0] - threshold
++            ) & (
++                depth_values <= mode_depth[0] + threshold
++            )
++        else:
++            depth_values_filtered = np.ones_like(depth_values, dtype=bool)
+ 
+         # Unproject only filtered points
+         points_filtered = []
+@@ -292,10 +305,9 @@ class DepthModule:
+         '''
+         # Set camera intrinsic matrix (K)
+         image_w, image_h = image.size
+-        focal_len_ndc = 4.0
+-        focal_len = focal_len_ndc * image_w
++        focal_len = self.get_focal_length(image_w)
+         px, py = image_w / 2, image_h / 2
+-        
++
+         K = np.array([
+             [focal_len, 0.0, px],
+             [0.0, focal_len, py],
+diff --git a/apc/vision_modules/detection.py b/apc/vision_modules/detection.py
+index 076dd9c..c7f114f 100644
+--- a/apc/vision_modules/detection.py
++++ b/apc/vision_modules/detection.py
+@@ -7,6 +7,7 @@ Scene Abstraction:
+ '''
+ import os
+ import io
++import re
+ import sys
+ import cv2
+ import matplotlib.pyplot as plt
+@@ -91,6 +92,7 @@ class DetectionModule:
+             caption=category,
+             box_threshold=self.config.detection.box_threshold,
+             text_threshold=self.config.detection.text_threshold,
++            device=self.device,     # predict() defaults to "cuda" and moves the model there
+         )
+         # Get detections with highest scores
+         boxes_sorted = sort_by_scores(scores, [boxes])[0]
+@@ -168,11 +170,19 @@ class DetectionModule:
+         print(f"* [INFO] Response for VLM detection refinement: {response}")
+         
+         # Get the selected index
++        n_valid = min(self.num_candidates, len(boxesAbs))
+         selected_idx = 0
+-        for i in range(min(self.num_candidates, len(boxesAbs))):
+-            if str(i) in response:
+-                selected_idx = i
+-                break
++        if self.config.detection.get("refinement_parse", "substring") == "first_integer":
++            # first number in the response, if it is a valid candidate index
++            match = re.search(r"\d+", response)
++            if match is not None and int(match.group()) < n_valid:
++                selected_idx = int(match.group())
++        else:
++            # original APC: first i whose digit appears anywhere in the response
++            for i in range(n_valid):
++                if str(i) in response:
++                    selected_idx = i
++                    break
+ 
+         # Return the selected detection for category
+         return boxesAbs[selected_idx]
+diff --git a/apc/vlms/vlm_qwenvl2_5.py b/apc/vlms/vlm_qwenvl2_5.py
+index 7ee0689..15e6fdb 100644
+--- a/apc/vlms/vlm_qwenvl2_5.py
++++ b/apc/vlms/vlm_qwenvl2_5.py
+@@ -15,6 +15,7 @@ class ModelQwenVL2_5(VLMBase):
+         ):
+         super().__init__(device)
+         self.device = device
++        self.config = config
+ 
+         # Initialize model
+         self.load_model(config, device=device)
+@@ -31,7 +32,7 @@ class ModelQwenVL2_5(VLMBase):
+         self,
+         prompt,
+         image=None,
+-        max_new_tokens=1024,
++        max_new_tokens=None,
+         do_sample=False,
+         temperature=0.0,
+     ):
+@@ -66,13 +67,15 @@ class ModelQwenVL2_5(VLMBase):
+     def process_messages(
+         self,
+         messages,
+-        max_new_tokens=1024,
++        max_new_tokens=None,
+         do_sample=False,
+         temperature=0.0,
+     ):
+         """
+         Process full conversation
+         """
++        if max_new_tokens is None:
++            max_new_tokens = self.config.max_new_tokens
+         # process messages
+         text = self.processor.apply_chat_template(
+             messages,
